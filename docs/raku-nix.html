@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Building Raku modules with Nix</title>
+<style>
+    body { color: rgb(34, 34, 34);
+            font-family: sans-serif;
+            font-size: 14px;
+            line-height: 1.6em;
+            margin: 1rem; }
+    abbr { font-size: 1.6ex; }
+    h1 { font-size: 2rem; }
+    h2 { font-size: 1.6rem; }
+    article { max-width: 40rem;
+               margin: 0 auto;
+               hyphens: auto;
+               text-align: justify; }
+    .irc { cursor: default;
+            text-decoration: underline;
+            text-decoration-style: dotted; }
+</style>
+<article>
+    <h1>Building Raku modules with Nix</h1>
+    <p>chloekek @ <time>2020, April 3rd</time></p>
+    <!-- %title Building Raku modules with Nix -->
+<!-- %date 2020, April 3rd -->
+
+<p>
+    In this blog post I would like to discuss my findings about building Raku
+        modules with Nix, including community modules, and the infrastructure
+        that is now partially in place.
+
+<p>
+    This all began with the desire to use the Raku programming language in a
+        project that was already using the Nix package manager.
+    Nix makes it easy to build and deploy software, by using a robust strategy
+        for managing dependencies based on sandboxing and cryptographic hashes.
+    The existing package management infrastructure for Raku relies on a more
+        traditional approach based on imperative installation commands.
+    I will not go into the pros and cons of each solution, but will instead
+        focus on how I got it all working with Nix.
+
+<h2>Writing raku-nix</h2>
+
+<p>
+    The first step down the rabbit hole is
+        <a href="https://github.com/chloekek/raku-nix">raku-nix</a>, a bunch of
+        Nix code for building Raku modules.
+
+<p>
+    There are two steps to building a Raku module: invoke Build.pm if it
+        exists, and precompile the distribution into a repository.
+    A distribution is a collection of source files and resources along with a
+        <abbr>META6</abbr>.json file.
+    A repository is a collection of precompiled distributions.
+    With the traditional approach, you usually have one repository in your home
+        directory, but because of how Nix isolates packages I go with creating
+        one repository for each distribution.
+
+<p>
+    These two steps now have to be implemented in a combination of Nix and
+        Bash.
+    Both steps are easy at the surface, but setting up the
+        <abbr>PERL6LIB</abbr> environment variable so that the module can find
+        its dependencies is rather tricky.
+    The <abbr>PERL6LIB</abbr> environment variable must contain one entry for
+        each repository, and modules are looked up in these repositories in
+        the order given.
+    It appears that the first entry in the <abbr>PERL6LIB</abbr> environment
+        variable <em>has to be</em> the module itself, otherwise you would get
+        obscure error messages.
+
+<p>
+    With all that out of the way, I have now written the
+        <a href="https://github.com/chloekek/raku-nix/blob/master/tools/rakuPackage.nix">rakuPackage</a>
+        function, whose invocation looks like this:
+
+<pre>rakuPackage {
+    name = "LibCurl";
+    depends = [ rakuPackages."JSON-Fast" ];
+    buildDepends = [ ];
+    nativeDepends = [ curl ];
+    src = fetchurl {
+        url = "https://www.cpan.org/authors/id/C/CT/CTILMES/Perl6/LibCurl-0.9.tar.gz";
+        sha256 = "937508b3646a8db98d74e624c78b27a3f729c4cf9a83414d2447e535be152d9e";
+    };
+}</pre>
+
+<p>
+    Note that Nix requires you to put a hash of the tarball in the package
+        description.
+    This ensures that your build will give the same output no matter where or
+        when you run it.
+    Of course, looking up all of these hashes by hand is a tremendously boring
+        and tedious task, especially when using modules that have lots of
+        transitive dependencies.
+    So we tumble deeper down the rabbit hole …
+
+<h2>Developing <abbr>CRAI</abbr></h2>
+
+<p>
+    To automate finding archives (tarballs) and hashes I developed
+        <a href="https://crai.foldr.nl"><abbr>CRAI</abbr></a>.
+    Every hour, <abbr>CRAI</abbr> finds a list of all Raku modules on
+        <abbr>CPAN</abbr> and GitHub and computes hashes of new versions.
+    You can search this database using the web interface, or download it
+        directly.
+    Please note that the web interface is far from finished.
+
+<p>
+    Finding archives on <abbr>CPAN</abbr> is trivial, with rsync.
+    It is by far the easiest part of this whole expedition.
+    Finding archives of modules hosted on GitHub, however, is not as easy.
+    It took me weeks to figure out how to do this, but I think I found an
+        acceptable solution:
+
+<ul>
+    <li>
+        The starting point is the file at
+            <code>https://ecosystem-api.p6c.org/projects.json</code>, which
+            contains an index of all <abbr>META6</abbr>.json files of
+            GitHub-hosted Raku modules.
+        Each entry in this file only points to a GitHub repository, so to find
+            the archive URLs we need to do a little more work.
+        I have no idea who maintains this endpoint, but kudos to them, as it is
+            incredibly helpful!
+    <li>
+        If people use Git tags to highlight their releases, then simply listing
+            the tags and creating a GitHub archive URL for each does the trick.
+    <li>
+        If not, then there is nothing we can do but to create an archive for
+            the <abbr>HEAD</abbr> commit.
+        New versions will pour in because <abbr>CRAI</abbr> re-indexes these
+            hourly, but if <abbr>HEAD</abbr> does not change the version
+            number in <abbr>META6</abbr>.json then you will simply end up
+            with multiple archives that use the same version number but have
+            different hashes.
+        C’est la vie.
+</ul>
+
+<h2>Back to raku-nix</h2>
+
+<p>
+    Now that <abbr>CRAI</abbr> was in place, I could write
+        <a href="https://github.com/chloekek/raku-nix/blob/master/tools/generate-nix.pl">a script</a>
+        to download the database and generate a Nix package description for
+        each latest version of each Raku community module.
+    These are now all available in the raku-nix GitHub repository.
+
+<h2>Conclusion</h2>
+
+<p>
+    If you like Nix and Raku I hope you found this blog post interesting.
+    If you decide to use raku-nix please let me know what you think and how it
+        can be improved.
+
+    <p>
+        You can always contact me
+        on <span class="irc" title="/query chloekek">Freenode</span>
+        or by <a href="mailto:rightfold@gmail.com?subject=Re: Building Raku modules with Nix">email</a>.
+    </p>
+</article>
+</html>
